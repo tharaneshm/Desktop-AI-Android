@@ -1,6 +1,16 @@
 package com.tharanesh.desktopai;
 
 import android.app.Activity;
+import android.content.DialogInterface;
+import android.text.InputType;
+import android.widget.Toast;
+import org.json.JSONObject;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+
 import android.app.AlertDialog;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -21,6 +31,12 @@ public class AI extends Activity {
     private EditText input;
     private TextView status;
     private boolean terminalMode = false;
+
+    private static final String WORKER_URL =
+            "https://desktop-ai-backend.tharaneshmanogaran.workers.dev/";
+    // Kept in memory only; never written into source or preferences.
+    private String appAccessToken;
+
 
     private final java.util.concurrent.ExecutorService executor =
             Executors.newSingleThreadExecutor();
@@ -142,8 +158,7 @@ public class AI extends Activity {
         addMessage("You", command);
 
         if (!terminalMode) {
-            addMessage("Jarvis",
-                "The AI backend isn't connected yet. We'll connect it securely next.");
+            askJarvis(command);
             return;
         }
 
@@ -163,6 +178,118 @@ public class AI extends Activity {
         } else {
             execute(command);
         }
+    }
+
+
+    private void askJarvis(String message) {
+        if (appAccessToken == null || appAccessToken.trim().isEmpty()) {
+            promptForToken(message);
+            return;
+        }
+
+        status.setText("JARVIS  •  Connecting...");
+        executor.execute(() -> {
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection)
+                        new URL(WORKER_URL).openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(15000);
+                connection.setReadTimeout(30000);
+                connection.setDoOutput(true);
+                connection.setRequestProperty(
+                        "Content-Type", "application/json; charset=UTF-8");
+                connection.setRequestProperty(
+                        "X-App-Token", appAccessToken);
+
+                byte[] payload = new JSONObject()
+                        .put("message", message)
+                        .toString()
+                        .getBytes(StandardCharsets.UTF_8);
+
+                connection.setFixedLengthStreamingMode(payload.length);
+                try (OutputStream out = connection.getOutputStream()) {
+                    out.write(payload);
+                }
+
+                int code = connection.getResponseCode();
+                InputStream stream = code >= 200 && code < 300
+                        ? connection.getInputStream()
+                        : connection.getErrorStream();
+
+                StringBuilder response = new StringBuilder();
+                if (stream != null) {
+                    try (InputStream in = stream;
+                         java.io.BufferedReader reader =
+                           new java.io.BufferedReader(
+                             new java.io.InputStreamReader(
+                               in, StandardCharsets.UTF_8))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            if (response.length() < 20000) {
+                                response.append(line);
+                            }
+                        }
+                    }
+                }
+
+                JSONObject json = new JSONObject(response.toString());
+                String reply = json.optString("reply", "");
+                String error = json.optString(
+                        "error", "Request failed (HTTP " + code + ")");
+
+                runOnUiThread(() -> {
+                    status.setText("JARVIS  •  Ready");
+                    if (code >= 200 && code < 300 && !reply.isEmpty()) {
+                        addMessage("Jarvis", reply);
+                    } else {
+                        addMessage("Jarvis", error);
+                        if (code == 401) {
+                            appAccessToken = null;
+                            addMessage("System",
+                                    "Check the access token and try again.");
+                        }
+                    }
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    status.setText("JARVIS  •  Connection error");
+                    addMessage("Jarvis",
+                            "Couldn't reach the AI backend. Check your "
+                          + "internet connection and Worker configuration.");
+                });
+            } finally {
+                if (connection != null) connection.disconnect();
+            }
+        });
+    }
+
+    private void promptForToken(String message) {
+        EditText tokenInput = new EditText(this);
+        tokenInput.setSingleLine(true);
+        tokenInput.setHint("APP_ACCESS_TOKEN");
+        tokenInput.setInputType(
+                InputType.TYPE_CLASS_TEXT
+              | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Connect to Jarvis")
+                .setMessage("Enter your Cloudflare APP_ACCESS_TOKEN. "
+                        + "It will remain in memory only until the app "
+                        + "process is closed.")
+                .setView(tokenInput)
+                .setNegativeButton("Cancel", (dialog, which) ->
+                        addMessage("Jarvis", "Connection cancelled."))
+                .setPositiveButton("Connect", (dialog, which) -> {
+                    String token = tokenInput.getText().toString().trim();
+                    if (token.isEmpty()) {
+                        addMessage("Jarvis", "No token entered.");
+                        return;
+                    }
+                    appAccessToken = token;
+                    askJarvis(message);
+                })
+                .show();
     }
 
     private void execute(String command) {

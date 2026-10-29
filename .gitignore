@@ -6,3 +6,7 @@ local.properties
 *.keystore
 .env
 secrets.properties
+
+# Local development files
+AI.java.backup
+patch_ai.py
